@@ -1,0 +1,310 @@
+---
+- name: Add Icinga2 repository
+  yum: name="https://packages.icinga.org/epel/7/release/noarch/icinga-rpm-release-7-1.el7.centos.noarch.rpm" state=installed
+
+- name: Install packages
+  yum: name={{ item }} state=present
+  with_items:
+  - epel-release
+  - icinga2
+  - nagios-plugins-all
+  - vim-icinga2
+  - nano-icinga2
+  - mariadb-server
+  - mysql
+  - icinga2-ido-mysql
+  - MySQL-python
+  - libselinux-python
+  - python-pip
+  - httpd
+  - icingaweb2
+  - icingacli
+
+- name: Disable selinux
+  selinux: state=disabled
+
+- name: Install pexpect
+  shell: pip install pexpect
+
+- name: Enable syntax highlighting in nano
+  blockinfile:
+    dest: /etc/nanorc
+    block: |
+      
+      ## Icinga 2
+      include "/usr/share/nano/icinga2.nanorc"
+
+- name: Check that mysql database exists
+  stat: path=/var/lib/mysql/mysql get_checksum=False get_md5=False
+  changed_when: false
+  register: mysqldb
+
+- name: Run mysql_install_db if it doesn't
+  shell: mysql_install_db
+  when: not mysqldb.stat.exists
+
+- name: Fix permissions on newly created databases
+  file: path=/var/lib/mysql owner=mysql group=mysql mode=0755 recurse=yes
+  when: not mysqldb.stat.exists
+
+- name: Enable newly installed services
+  service: name="{{ item }}" state=started enabled=yes
+  with_items:
+    - mariadb
+    - icinga2
+    - httpd
+
+- name: Delete anonymous MySQL users
+  mysql_user: name='' host_all=yes state=absent
+  when: not mysqldb.stat.exists
+
+- name: Delete the MySQL test database
+  mysql_db: db=test state=absent
+  when: not mysqldb.stat.exists
+
+- name: Change root password
+  command: mysql --user="root" --password="" -e "update mysql.user set password=PASSWORD('{{ mysql_root_pass }}') where user='root'; flush privileges"
+  when: not mysqldb.stat.exists
+
+- name: Check that /root/.my.cnf exists
+  stat: path=/root/.my.cnf get_checksum=False get_md5=False
+  changed_when: false
+  register: mycnf
+
+- name: Create /root/.my.cnf if it doesn't
+  copy: src=root-my.cnf dest=/root/.my.cnf owner=root group=root mode=0600
+  when: not mycnf.stat.exists
+
+- name: Save root password
+  ini_file: dest=/root/.my.cnf section=client option=password value="{{ mysql_root_pass }}"
+  when: not mysqldb.stat.exists and not mycnf.stat.exists
+
+- name: Create Icinga2 database
+  mysql_db: name={{ icinga2_db_name }} state=present
+
+- name: Create user and give him propper privileges
+  mysql_user: name={{ icinga2_db_user }} password={{ icinga2_db_password }} priv={{ icinga2_db_name }}.*:ALL state=present
+
+- name: Import database structure
+  mysql_db: state=import name={{ icinga2_db_name }} target=/usr/share/icinga2-ido-mysql/schema/mysql.sql
+
+- name: Enable command feature
+  shell: icinga2 feature enable command
+
+- name: Update NodeName in constants.conf
+  lineinfile: dest=/etc/icinga2/constants.conf regexp="^//const NodeName" line="const NodeName = "{{ inventory_hostname }}""
+
+- name: Update ZoneName in constants.conf
+  lineinfile: dest=/etc/icinga2/constants.conf regexp="^const ZoneName" line="const ZoneName = "{{ icinga2_zonename }}""
+
+- name: Update user in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //user" line="  user = "{{ icinga2_db_user }}""
+
+- name: Update password in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //password" line="  password = "{{ icinga2_db_password }}""
+
+- name: Update host in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //host" line="  host = "{{ icinga2_db_host }}""
+
+- name: Update database in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //database" line="  database = "{{ icinga2_db_name }}""
+
+- name: Add enable_ha to ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^const ZoneName" insertafter="  database" line="  enable_ha = false"
+
+- name: Perform a node setup
+  expect:
+    command: icinga2 node wizard
+    responses:
+      Please specify if this is a satellite setup: "n"
+      Please specifiy the common name: "{{ inventory_hostname }}"
+      Bind Host: ""
+      Bind Port: ""
+
+- name: Update ZoneName in constants.conf
+  lineinfile: dest=/etc/icinga2/constants.conf regexp="^const ZoneName" line="const ZoneName = "{{ icinga2_zonename }}""
+
+vim zones.conf
+mkdir zones.d/master
+mkdir zones.d/global-templates
+mv /etc/icinga2/conf.d/hosts.conf /etc/icinga2/zones.d/master/
+mv /etc/icinga2/conf.d/* /etc/icinga2/zones.d/global-templates
+
+- name: Update /etc/icinga2/icinga2.conf
+  lineinfile:
+    dest: /etc/icinga2/icinga2.conf
+    regexp: "include_recursive "conf.d""
+    line: "# include_recursive "conf.d""
+
+service icinga2 restart
+
+MariaDB [(none)]> create database icingaweb2;
+Query OK, 1 row affected (0.00 sec)
+
+MariaDB [(none)]> grant all on icigaweb2.* to icingaweb2@localhost identified by 'iloveicingaweb2too';
+Query OK, 0 rows affected (0.00 sec)
+
+MariaDB [(none)]> flush privileges;
+Query OK, 0 rows affected (0.00 sec)
+
+Creating new database "icigaweb2"...
+Creating database schema...
+Creating login "icigaweb2"...
+Granting required privileges to login "icigaweb2"...
+The database has been fully set up!
+
+General configuration has been successfully written to: /etc/icingaweb2/config.ini
+
+Authentication configuration has been successfully written to: /etc/icingaweb2/authentication.ini
+Account "Admin" has been successfully created.
+Account "Admin" has been successfully defined as initial administrator.
+
+User Group Backend configuration has been successfully written to: /etc/icingaweb2/groups.ini
+User Group "Administrators" has been successfully created.
+Account "Admin" has been successfully added as member to user group "Administrators".
+
+Resource configuration has been successfully written to: /etc/icingaweb2/resources.ini
+
+Monitoring backend configuration has been successfully written to: /etc/icingaweb2/modules/monitoring/backends.ini
+Resource configuration has been successfully updated: /etc/icingaweb2/resources.ini
+
+Command transport configuration has been successfully created: /etc/icingaweb2/modules/monitoring/commandtransports.ini
+
+Monitoring security configuration has been successfully created: /etc/icingaweb2/modules/monitoring/config.ini
+
+Module "monitoring" has been successfully enabled.
+
+   64  icingacli setup token create;
+   65  vim /etc/php.ini
+   66  service httpd restart
+   67  mysql
+   68  cat ~/.my
+   69  cat ~/.my.cnf
+   70  service icinga2 restart
+   71  ls
+   72  cd zones.d/global-templates/
+   73  ls
+   74  less templates.conf
+   75  grep -R swap .
+   76  less services.conf
+   77  joe services.conf
+   78  vim services.conf
+   79  service icinga2 restart
+   80  vim services.conf
+   81  service icinga2 restart
+   82  vim services.conf
+   83  history
+
+Icinga Web 2 Manual Setup
+
+If you have chosen not to run the setup wizard, you will need further knowledge about
+
+manual creation of the Icinga Web 2 database icingaweb2 including a default user (optional as authentication and session backend)
+additional configuration for the application
+additional configuration for the monitoring module (e.g. the IDO database and external command pipe from Icinga 2)
+This comes in handy if you are planning to deploy Icinga Web 2 automatically using Puppet, Ansible, Chef, etc. modules.
+
+Warning
+
+Read the documentation on the respective linked configuration sections before deploying the configuration manually.
+
+If you are unsure about certain settings, use the setup wizard once and then collect the generated configuration as well as sql dumps.
+Icinga Web 2 Manual Database Setup
+
+Create the database and add a new user as shown below for MySQL:
+
+sudo mysql -p
+
+CREATE DATABASE {{ icingaweb2_db_name }};
+GRANT SELECT, INSERT, UPDATE, DELETE, DROP, CREATE VIEW, INDEX, EXECUTE ON {{ icingaweb2_db_name }}.* TO '{{ icingaweb2_db_user }}'@'{{ icingaweb2_db_host }}' IDENTIFIED BY '{{ icingaweb2_db_password }}';
+quit
+
+mysql -p {{ icingaweb2_db_name }} < /usr/share/icingaweb2/etc/schema/mysql.schema.sql
+Then generate a new password hash as described in the authentication docs and use it to insert a new user called icingaadmin into the database.
+
+- name: Generate icingaweb2 Admin password
+  shell: openssl passwd -1 {{ icingaweb2_admin_pass }}
+  register: icingaweb2_admin_pass_hash
+
+mysql -p icingaweb2
+
+INSERT INTO icingaweb_user (name, active, password_hash) VALUES ('{{ icingaweb2_admin_login }}', 1, '{{ icingaweb2_admin_pass_hash.stdout }}');
+quit
+Icinga Web 2 Manual Configuration
+
+resources.ini providing the details for the Icinga Web 2 and Icinga 2 IDO database configuration. Example for MySQL:
+
+vim /etc/icingaweb2/resources.ini
+
+[icingaweb2]
+type                = "db"
+db                  = "mysql"
+host                = "localhost"
+port                = "3306"
+dbname              = "icingaweb2"
+username            = "icingaweb2"
+password            = "icingaweb2"
+
+
+[icinga2]
+type                = "db"
+db                  = "mysql"
+host                = "localhost"
+port                = "3306"
+dbname              = "icinga"
+username            = "icinga"
+password            = "icinga"
+config.ini defining general application settings.
+
+vim /etc/icingaweb2/config.ini
+
+[logging]
+log                 = "syslog"
+level               = "ERROR"
+application         = "icingaweb2"
+
+
+[preferences]
+type                = "db"
+resource            = "icingaweb2"
+authentication.ini for e.g. using the previously created database.
+
+vim /etc/icingaweb2/authentication.ini
+
+[icingaweb2]
+backend             = "db"
+resource            = "icingaweb2"
+roles.ini granting the previously added icingaadmin user all permissions.
+
+vim /etc/icingaweb2/roles.ini
+
+[admins]
+users               = "icingaadmin"
+permissions         = "*"
+Icinga Web 2 Manual Configuration Monitoring Module
+
+config.ini defining additional security settings.
+
+vim /etc/icingaweb2/modules/monitoring/config.ini
+
+[security]
+protected_customvars = "*pw*,*pass*,community"
+backends.ini referencing the Icinga 2 DB IDO resource.
+
+vim /etc/icingaweb2/modules/monitoring/backends.ini
+
+[icinga2]
+type                = "ido"
+resource            = "icinga2"
+commandtransports.ini defining the Icinga command pipe.
+
+vim /etc/icingaweb2/modules/monitoring/commandtransports.ini
+
+[icinga2]
+transport           = "local"
+path                = "/var/run/icinga2/cmd/icinga2.cmd"
+Icinga Web 2 Manual Setup Login
+
+Finally visit Icinga Web 2 in your browser to login as icingaadmin user: /icingaweb2.
+
+#vim /etc/icinga2/zones.conf

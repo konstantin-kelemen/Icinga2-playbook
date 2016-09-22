@@ -1,0 +1,12 @@
+[master]
+icinga2-master01.kel.mn ansible_ssh_host=188.42.219.75
+icinga2-master02.kel.mn ansible_ssh_host=188.42.219.76
+icinga2-master03.kel.mn ansible_ssh_host=188.42.219.77
+
+[nl]
+
+[us]
+
+[satellites:children]
+nl
+us
