@@ -1,0 +1,152 @@
+---
+- name: Add Icinga2 repository
+  yum: name="https://packages.icinga.org/epel/7/release/noarch/icinga-rpm-release-7-1.el7.centos.noarch.rpm" state=installed
+
+- name: Install packages
+  yum: name={{ item }} state=present
+  with_items:
+  - epel-release
+  - icinga2
+  - nagios-plugins-all
+  - vim-icinga2
+  - nano-icinga2
+  - mariadb-server
+  - mysql
+  - icinga2-ido-mysql
+  - MySQL-python
+  - libselinux-python
+  - python-pip
+  - httpd
+  - icingaweb2
+  - icingacli
+
+- name: Disable selinux
+  selinux: state=disabled
+
+- name: Install pexpect
+  shell: pip install pexpect
+
+- name: Enable syntax highlighting in nano
+  blockinfile:
+    dest: /etc/nanorc
+    block: |
+      ## Icinga 2
+      include "/usr/share/nano/icinga2.nanorc"
+
+- name: Check that mysql database exists
+  stat: path=/var/lib/mysql/mysql get_checksum=False get_md5=False
+  changed_when: false
+  register: mysqldb
+
+- name: Run mysql_install_db if it doesn't
+  shell: mysql_install_db
+  when: not mysqldb.stat.exists
+
+- name: Fix permissions on newly created databases
+  file: path=/var/lib/mysql owner=mysql group=mysql mode=0755 recurse=yes
+  when: not mysqldb.stat.exists
+
+- name: Enable newly installed services
+  service: name="{{ item }}" state=started enabled=yes
+  with_items:
+    - mariadb
+    - icinga2
+    - httpd
+
+- name: Delete anonymous MySQL users
+  mysql_user: name='' host_all=yes state=absent
+  when: not mysqldb.stat.exists
+
+- name: Delete the MySQL test database
+  mysql_db: db=test state=absent
+  when: not mysqldb.stat.exists
+
+- name: Change root password
+  command: mysql --user="root" --password="" -e "update mysql.user set password=PASSWORD('{{ mysql_root_pass }}') where user='root'; flush privileges"
+  when: not mysqldb.stat.exists
+
+- name: Check that /root/.my.cnf exists
+  stat: path=/root/.my.cnf get_checksum=False get_md5=False
+  changed_when: false
+  register: mycnf
+
+- name: Create /root/.my.cnf if it doesn't
+  copy: src=root-my.cnf dest=/root/.my.cnf owner=root group=root mode=0600
+  when: not mycnf.stat.exists
+
+- name: Save root password
+  ini_file: dest=/root/.my.cnf section=client option=password value="{{ mysql_root_pass }}"
+  when: not mysqldb.stat.exists and not mycnf.stat.exists
+
+- name: Create Icinga2 database
+  mysql_db: name={{ icinga2_db_name }} state=present
+
+- name: Create user and give him propper privileges
+  mysql_user: name={{ icinga2_db_user }} password={{ icinga2_db_password }} priv={{ icinga2_db_name }}.*:ALL state=present
+
+- name: Import database structure
+  mysql_db:
+    state: import
+    login_host: {{ master_db_host }}
+    name: {{ icinga2_db_name }} target=/usr/share/icinga2-ido-mysql/schema/mysql.sql
+# Experimental
+  run_once: true
+  delegate: {{ hostvars[groups['master'][0]]['inventory_hostname'] }}
+
+- name: Enable command feature
+  shell: icinga2 feature enable command
+
+- name: Update NodeName in constants.conf
+  lineinfile: dest=/etc/icinga2/constants.conf regexp="^//const NodeName" line="const NodeName = "{{ inventory_hostname }}""
+
+- name: Update ZoneName in constants.conf
+  lineinfile: dest=/etc/icinga2/constants.conf regexp="^const ZoneName" line="const ZoneName = "{{ icinga2_zonename }}""
+
+- name: Update user in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //user" line="  user = "{{ icinga2_db_user }}""
+
+- name: Update password in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //password" line="  password = "{{ icinga2_db_password }}""
+
+- name: Update host in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //host" line="  host = "{{ master_db_host }}""
+
+- name: Update database in ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^  //database" line="  database = "{{ icinga2_db_name }}""
+
+- name: Add enable_ha to ido-mysql.conf
+  lineinfile: dest=/etc/icinga2/features-enabled/ido-mysql.conf regexp="^const ZoneName" insertafter="  database" line="  enable_ha = false"
+
+- name: Perform a node setup
+  expect:
+    command: icinga2 node wizard
+    responses:
+      Please specify if this is a satellite setup: "n"
+      Please specifiy the common name: "{{ inventory_hostname }}"
+      Bind Host: ""
+      Bind Port: ""
+
+- name: Update ZoneName in constants.conf
+  lineinfile: dest=/etc/icinga2/constants.conf regexp="^const ZoneName" line="const ZoneName = "{{ icinga2_zonename }}""
+
+- name: Create directories for each zone
+  file: dest=/etc/icinga2/zones.d/{{ item }} state=directory owner=icinga group=icinga mode=0750
+  with_items: "{{ groups }}"
+  when: item != "satellites" and item != "all" and item != "ungrouped"
+
+- name: Create directories for each zone
+  file: dest=/etc/icinga2/zones.d/{{ item }} state=directory owner=icinga group=icinga mode=0750
+
+- name: Create global-templates zone directory
+  file: dest=/etc/icinga2/zones.d/global-templates state=directory owner=icinga group=icinga mode=0750
+
+mv /etc/icinga2/conf.d/hosts.conf /etc/icinga2/zones.d/master/
+mv /etc/icinga2/conf.d/* /etc/icinga2/zones.d/global-templates
+
+- name: Update /etc/icinga2/icinga2.conf
+  lineinfile:
+    dest: /etc/icinga2/icinga2.conf
+    regexp: "include_recursive "conf.d""
+    line: "# include_recursive "conf.d""
+
+service icinga2 restart

@@ -1,0 +1,66 @@
+---
+- name: Install packages
+  yum: name={{ item }} state=present
+  with_items:
+  - httpd
+  - icingaweb2
+  - icingacli
+
+vim /etc/php.ini
+
+service httpd restart
+
+CREATE DATABASE {{ icingaweb2_db_name }};
+GRANT ALL ON {{ icingaweb2_db_name }}.* TO '{{ icingaweb2_db_user }}'@'{{ master_db_host }}' IDENTIFIED BY '{{ icingaweb2_db_password }}';
+flush privileges;
+
+mysql -p {{ icingaweb2_db_name }} < /usr/share/icingaweb2/etc/schema/mysql.schema.sql
+
+- name: Generate icingaweb2 Admin password
+  shell: openssl passwd -1 {{ icingaweb2_admin_pass }}
+  register: icingaweb2_admin_pass_hash
+
+mysql -p {{ icingaweb2_db_name }}
+
+INSERT INTO icingaweb_user (name, active, password_hash) VALUES ('{{ icingaweb2_admin_login }}', 1, '{{ icingaweb2_admin_pass_hash.stdout }}');
+quit
+
+- template:
+    src: config.ini.j2
+    dest: /etc/icingaweb2/config.ini
+
+- template:
+    src: authentication.ini.j2
+    dest: /etc/icingaweb2/authentication.ini
+
+- template:
+    src:
+    dest: /etc/icingaweb2/groups.ini
+
+- template:
+    src: roles.ini.j2
+    dest: /etc/icingaweb2/roles.ini
+
+- template:
+    src=: odules-monitoring-backends.ini.j2
+    dest: /etc/icingaweb2/modules/monitoring/backends.ini
+
+- template:
+    src: resources.ini.j2
+    dest: /etc/icingaweb2/resources.ini
+
+- template:
+    src: modules-monitoring-commandtransports.ini.j2
+    dest: /etc/icingaweb2/modules/monitoring/commandtransports.ini
+
+- template:
+    src: modules-monitoring-config.ini.j2
+    dest: /etc/icingaweb2/modules/monitoring/config.ini
+
+Module "monitoring" has been successfully enabled.
+
+
+
+
+
+Finally visit Icinga Web 2 in your browser to login as icingaadmin user: /icingaweb2.
