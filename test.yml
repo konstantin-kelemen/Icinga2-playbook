@@ -1,0 +1,17 @@
+---
+- hosts: all
+  tasks:
+#  - debug: msg="{{ hostvars[item]['ansible_ssh_host'] }}"
+#  - debug: msg="{{ hostvars[item]['group_names'] }}"
+#    with_items: "{{ groups['satellites'] }}"
+
+#  - debug: msg="{{ item }}"
+#    with_items: "{{ groups }}"
+#    when: item != "master" and item != "satellites" and item != "ungrouped"
+    
+#  - debug: msg="{{ groups_aaa }}"
+
+  - name: Create directories for each zone
+    file: dest=/etc/icinga2/zones.d/{{ item }} state=directory owner=icinga group=icinga mode=0750
+    with_items: "{{ groups }}"
+    when: item != "master" and item != "satellites" and item != "all" and item != "ungrouped"
